@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depths of Sosaria — UOスキル制ダンジョンクローラー</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="wrap">
+  <div id="gameArea">
+    <canvas id="cv" width="960" height="600"></canvas>
+
+    <div id="hud">
+      <div class="bar" id="hpBar"><span class="fill"></span><span class="txt"></span></div>
+      <div class="bar" id="manaBar"><span class="fill"></span><span class="txt"></span></div>
+      <div class="bar" id="stamBar"><span class="fill"></span><span class="txt"></span></div>
+      <div id="depthLabel"></div>
+      <div id="goldLabel"></div>
+      <div id="stateLabel"></div>
+    </div>
+
+    <div id="help">移動:WASD/矢印 ・ E:調べる(階段▼▲/宝箱📦/鉱脈◆) ・ 1-5:魔法 ・ B:包帯 ・ H:隠密 ・ M:瞑想 ・ C:スキル ・ I:所持品</div>
+
+    <div id="skillPanel" class="panel hidden"></div>
+    <div id="invPanel" class="panel hidden"></div>
+
+    <div id="campScreen" class="screen hidden"></div>
+    <div id="titleScreen" class="screen"></div>
+    <div id="deathScreen" class="screen hidden"></div>
+  </div>
+  <div id="log"></div>
+</div>
+
+<script src="js/rng.js"></script>
+<script src="js/data.js"></script>
+<script src="js/skills.js"></script>
+<script src="js/items.js"></script>
+<script src="js/dungeon.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/combat.js"></script>
+<script src="js/crafting.js"></script>
+<script src="js/save.js"></script>
+<script src="js/render.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
