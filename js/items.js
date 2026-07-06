@@ -1,15 +1,10 @@
 'use strict';
-// アイテム生成・装備・スタック・ドロップ
-
-const STACKABLE = {
-  bandage: { name: '包帯' },
-  healpot: { name: '回復ポーション' },
-  manapot: { name: 'マナポーション' },
-};
+// アイテム生成・重量管理・装備・スタック・分配
 
 const Items = {
   _uid: 1,
 
+  // ===== 生成 =====
   makeWeapon(type, tierIdx, metalId) {
     const tier = WEAPON_TIERS[clamp(tierIdx, 0, WEAPON_TIERS.length - 1)];
     const metal = metalId ? METALS.find(m => m.id === metalId) : null;
@@ -56,30 +51,92 @@ const Items = {
     return { uid: this._uid++, kind: 'ingot', id: metalId, name: m.name + 'インゴット', n };
   },
 
-  // スタック可能なら統合しつつインベントリへ
-  addToInv(p, item, toStorage) {
-    const list = toStorage ? p.storage : p.inv;
-    if (item.kind === 'stack' || item.kind === 'ore' || item.kind === 'ingot') {
-      const ex = list.find(i => i.kind === item.kind && i.id === item.id);
-      if (ex) { ex.n += item.n; return; }
+  // ===== 重量 =====
+  weightOf(item) {
+    if (!item) return 0;
+    switch (item.kind) {
+      case 'weapon': return WEAPONS[item.type].w;
+      case 'armor': return ARMORS[item.type].w;
+      case 'shield': return SHIELDS[item.type].w;
+      case 'stack': return round1(STACKABLE[item.id].w * item.n);
+      case 'ore': return round1(ORE_W * item.n);
+      case 'ingot': return round1(INGOT_W * item.n);
     }
-    list.push(item);
+    return 0;
   },
 
-  count(p, id) {
-    const i = p.inv.find(x => (x.kind === 'stack' || x.kind === 'ore' || x.kind === 'ingot') && x.id === id);
-    return i ? i.n : 0;
+  // 所持重量 = 持ち物 + 装備
+  charWeight(c) {
+    let w = 0;
+    for (const it of c.inv) w += this.weightOf(it);
+    for (const slot of ['weapon', 'shield', 'armor']) w += this.weightOf(c.equip[slot]);
+    return round1(w);
   },
 
-  consume(p, id, n) {
-    const i = p.inv.find(x => (x.kind === 'stack' || x.kind === 'ore' || x.kind === 'ingot') && x.id === id);
-    if (!i || i.n < n) return false;
-    i.n -= n;
-    if (i.n <= 0) p.inv.splice(p.inv.indexOf(i), 1);
+  // 所持容量はSTR次第(UOのストーン制)
+  capacity(c) { return round1(15 + c.str * 1.5); },
+
+  canCarry(c, item) {
+    return this.charWeight(c) + this.weightOf(item) <= this.capacity(c);
+  },
+
+  // キャラに持たせる(重量チェック)。成功なら true
+  addToChar(c, item) {
+    if (!this.canCarry(c, item)) return false;
+    if (item.kind === 'stack' || item.kind === 'ore' || item.kind === 'ingot') {
+      const ex = c.inv.find(i => i.kind === item.kind && i.id === item.id);
+      if (ex) { ex.n += item.n; return true; }
+    }
+    c.inv.push(item);
     return true;
   },
 
-  // 深さに応じたティア抽選(深いほど高ティア)
+  // パーティの持てる者に分配。prefer を優先。持てた者を返す(全員無理なら null)
+  giveToParty(party, item, prefer) {
+    const order = prefer ? [prefer, ...party.filter(c => c !== prefer)] : party;
+    for (const c of order) {
+      if (c.dead) continue;
+      if (this.addToChar(c, item)) {
+        UI.dirty.party = true;
+        return c;
+      }
+    }
+    return null;
+  },
+
+  // ===== スタック操作 =====
+  count(c, id) {
+    const i = c.inv.find(x => (x.kind === 'stack' || x.kind === 'ore' || x.kind === 'ingot') && x.id === id);
+    return i ? i.n : 0;
+  },
+
+  consume(c, id, n) {
+    const i = c.inv.find(x => (x.kind === 'stack' || x.kind === 'ore' || x.kind === 'ingot') && x.id === id);
+    if (!i || i.n < n) return false;
+    i.n -= n;
+    if (i.n <= 0) c.inv.splice(c.inv.indexOf(i), 1);
+    UI.dirty.party = true;
+    return true;
+  },
+
+  partyCount(party, id) {
+    return party.reduce((s, c) => s + this.count(c, id), 0);
+  },
+
+  // パーティ全体から n 個消費(複数人にまたがってよい)
+  partyConsume(party, id, n) {
+    if (this.partyCount(party, id) < n) return false;
+    for (const c of party) {
+      while (n > 0 && this.count(c, id) > 0) {
+        const take = Math.min(n, this.count(c, id));
+        this.consume(c, id, take);
+        n -= take;
+      }
+    }
+    return true;
+  },
+
+  // ===== 戦利品 =====
   rollTier(depth, tiers) {
     let idx = 0;
     for (let i = 1; i < tiers.length; i++) {
@@ -102,58 +159,48 @@ const Items = {
     return this.makeShield(type, this.rollTier(depth, ARMOR_TIERS));
   },
 
-  dropLoot(p, e) {
-    const depth = Game.run ? Game.run.depth : 1;
-    const gold = randInt(e.gold[0], e.gold[1]);
-    if (gold > 0) { p.gold += gold; UI.log(`${gold}ゴールドを拾った。`, 'loot'); }
-    if (chance(0.22)) {
-      const item = this.randomEquip(depth);
-      this.addToInv(p, item);
-      UI.log(`${item.name}を手に入れた!`, item.tierIdx >= 3 ? 'rare' : 'loot');
-    }
-    if (chance(0.18)) { this.addToInv(p, this.makeStack('bandage', randInt(2, 5))); UI.log('包帯を拾った。', 'loot'); }
-    if (chance(0.1)) { this.addToInv(p, this.makeStack(chance(0.6) ? 'healpot' : 'manapot', 1)); UI.log('ポーションを拾った。', 'loot'); }
+  // 拾得処理: 分配してログを出す。誰も持てなければその旨を表示
+  award(party, item) {
+    const c = this.giveToParty(party, item);
+    if (c) UI.log(`${item.name}を手に入れた(${c.name}が携行)`, item.tierIdx >= 3 ? 'rare' : 'loot');
+    else UI.log(`${item.name}を見つけたが、重すぎて誰も持てない…置いていった。`, 'warn');
+    return !!c;
   },
 
-  openChest(p, depth) {
+  openChest(party, depth) {
     const gold = randInt(10 + depth * 8, 40 + depth * 18);
-    p.gold += gold;
+    Game.gold += gold;
     UI.log(`宝箱を開けた。${gold}ゴールド!`, 'loot');
-    if (chance(0.5)) {
-      const item = this.randomEquip(depth);
-      this.addToInv(p, item);
-      UI.log(`${item.name}を手に入れた!`, item.tierIdx >= 3 ? 'rare' : 'loot');
-    }
-    if (chance(0.3)) { this.addToInv(p, this.makeStack('healpot', 1)); UI.log('回復ポーションが入っていた。', 'loot'); }
+    if (chance(0.5)) this.award(party, this.randomEquip(depth));
+    if (chance(0.3)) this.award(party, this.makeStack('healpot', 1));
     if (chance(0.25)) {
       const metals = METALS.filter(m => m.depth <= depth);
-      const m = metals[metals.length - 1];
-      this.addToInv(p, this.makeIngot(m.id, randInt(2, 5)));
-      UI.log(`${m.name}インゴットが入っていた。`, 'loot');
+      this.award(party, this.makeIngot(metals[metals.length - 1].id, randInt(2, 4)));
     }
-    UI.dirty.inv = true;
+    UI.dirty.party = true;
   },
 
-  // 装備の説明文
   describe(item) {
+    const w = this.weightOf(item);
     if (item.kind === 'weapon') {
-      const w = WEAPONS[item.type];
-      const lo = Math.round(w.dmg[0] * item.mult), hi = Math.round(w.dmg[1] * item.mult);
-      return `攻${lo}-${hi} 速${w.speed}s ${SKILLS[w.skill].name}${item.accurate ? ' 命中+' : ''}`;
+      const wd = WEAPONS[item.type];
+      const lo = Math.round(wd.dmg[0] * item.mult), hi = Math.round(wd.dmg[1] * item.mult);
+      return `攻${lo}-${hi}${wd.range > 2 ? ' 遠隔' : ''} ${SKILLS[wd.skill].name}${item.accurate ? ' 命中+' : ''} 重${w}`;
     }
-    if (item.kind === 'armor' || item.kind === 'shield') return `防+${item.def}`;
-    if (item.n !== undefined) return `×${item.n}`;
-    return '';
+    if (item.kind === 'armor' || item.kind === 'shield') return `防+${item.def} 重${w}`;
+    if (item.n !== undefined) return `×${item.n} 重${w}`;
+    return `重${w}`;
   },
 
-  equip(p, item) {
+  // 装備(同キャラのinv内から)。装備品も重量に含むため容量は変わらない
+  equip(c, item) {
     const slot = item.kind === 'weapon' ? 'weapon' : (item.kind === 'shield' ? 'shield' : 'armor');
-    const idx = p.inv.indexOf(item);
+    const idx = c.inv.indexOf(item);
     if (idx < 0) return;
-    p.inv.splice(idx, 1);
-    if (p.equip[slot]) p.inv.push(p.equip[slot]);
-    p.equip[slot] = item;
-    UI.log(`${item.name}を装備した。`, 'sys');
-    UI.dirty.inv = true;
+    c.inv.splice(idx, 1);
+    if (c.equip[slot]) c.inv.push(c.equip[slot]);
+    c.equip[slot] = item;
+    UI.log(`${c.name}は${item.name}を装備した。`, 'sys');
+    UI.dirty.party = true;
   },
 };

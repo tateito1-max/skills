@@ -1,48 +1,66 @@
 'use strict';
-// ゲームループ・入力・状態遷移(タイトル ⇔ キャンプ ⇔ ダンジョン)
+// ゲーム進行: ターン制探索、状態遷移(タイトル ⇔ キャンプ ⇔ ダンジョン ⇔ 戦闘)
 
 const Game = {
-  state: 'title', // title | camp | dungeon | dead
-  player: null,
-  run: null,      // { depth, floors: {depth: {map, enemies}} }
-  keys: {},
-  lastT: 0,
+  state: 'title', // title | camp | dungeon | wipe
+  party: [], gold: 0, storage: [], deepest: 1,
+  run: null,      // { depth, floors: {depth: {map, packs}} }
+  px: 0, py: 0,   // パーティ位置(タイル)
+  turn: 0,
+  sneaking: false,
 
   init() {
     Render.init();
     UI.init();
     UI.renderTitle();
     UI.show('titleScreen');
-
     window.addEventListener('keydown', e => this.onKey(e));
-    window.addEventListener('keyup', e => { this.keys[e.key.toLowerCase()] = false; });
-
-    requestAnimationFrame(t => this.frame(t));
+    requestAnimationFrame(() => this.frame());
   },
 
-  startGame(player) {
-    if (!player) return;
-    this.player = player;
-    UI.hide('titleScreen');
-    this.toCamp(false);
-    UI.log('キャンプに到着した。装備を整えダンジョンへ潜ろう。', 'good');
+  map() { return this.run ? this.run.floors[this.run.depth].map : null; },
+  packs() { return this.run ? this.run.floors[this.run.depth].packs : []; },
+  aliveParty() { return this.party.filter(c => !c.dead); },
+
+  removePack(pack) {
+    const ps = this.packs();
+    const i = ps.indexOf(pack);
+    if (i >= 0) ps.splice(i, 1);
   },
 
-  toCamp(heal = true) {
-    const p = this.player;
+  // ===== 開始・キャンプ =====
+  newGame() {
+    this.party = []; this.gold = 300; this.storage = []; this.deepest = 1;
+    Save.clear();
+    this.toCamp();
+    UI.log('冒険者キャンプへようこそ。まずは酒場で仲間を集めよう。', 'good');
+  },
+
+  continueGame() {
+    const d = Save.load();
+    if (!d) return;
+    this.party = d.party; this.gold = d.gold; this.storage = d.storage; this.deepest = d.deepest;
+    this.toCamp();
+    UI.log('冒険の続きだ。', 'good');
+  },
+
+  toCamp() {
     this.state = 'camp';
     this.run = null;
-    if (heal) {
-      p.hp = p.maxHp; p.mana = p.maxMana; p.stam = p.maxStam;
+    this.sneaking = false;
+    for (const c of this.party) {
+      if (!c.dead) { c.hp = c.maxHp; c.mana = c.maxMana; }
+      c.defending = false;
     }
-    p.hidden = false; p.meditating = false; p.cast = null; p.bandT = 0; p.mineT = 0;
-    Save.save(p);
+    Save.save();
+    UI.hide('titleScreen'); UI.hide('wipeScreen'); UI.hide('charPanel');
     UI.renderCamp();
     UI.show('campScreen');
-    UI.dirty.skills = true; UI.dirty.inv = true;
+    UI.dirty.party = true;
   },
 
   enterDungeon(floor) {
+    if (this.aliveParty().length === 0) { UI.log('生きている仲間がいない!酒場か寺院へ。', 'warn'); return; }
     this.run = { depth: 0, floors: {} };
     UI.hide('campScreen');
     this.state = 'dungeon';
@@ -50,138 +68,174 @@ const Game = {
     UI.log(`地下${floor}階に足を踏み入れた。`, 'sys');
   },
 
-  // フロア移動。同一ラン中は生成済みフロアを保持
   gotoFloor(depth, dir) {
-    const p = this.player;
     if (!this.run.floors[depth]) this.run.floors[depth] = Dungeon.generate(depth);
     this.run.depth = depth;
-    const f = this.run.floors[depth];
-    if (dir === 'up') {
-      // 下の階から上がってきた: 下り階段の位置に出る
-      p.x = f.map.downX; p.y = f.map.downY;
-    } else {
-      p.x = f.map.spawnX; p.y = f.map.spawnY;
-    }
-    if (depth > p.deepest) {
-      p.deepest = depth;
+    const map = this.map();
+    if (dir === 'up') { this.px = map.downX; this.py = map.downY; }
+    else { this.px = map.spawnX; this.py = map.spawnY; }
+    if (depth > this.deepest) {
+      this.deepest = depth;
       UI.log(`最深記録を更新! 地下${depth}階`, 'rare');
     }
   },
 
-  onDeath() {
-    this.state = 'dead';
-    const p = this.player;
-    const nItems = p.inv.length;
-    const goldLost = Math.floor(p.gold * 0.3);
-    p.inv = [];
-    p.gold -= goldLost;
-    Save.save(p);
-    UI.renderDeath(`持っていた品${nItems}個と${goldLost}ゴールドを失った。`);
-    UI.show('deathScreen');
+  // ===== ターン進行 =====
+  // n ターン経過させる。戦闘が始まったら true を返す
+  advanceTurn(n, resting) {
+    for (let i = 0; i < n; i++) {
+      this.turn++;
+      // 回復(瞑想スキルでマナ再生が伸びる)
+      for (const c of this.party) {
+        if (c.dead) continue;
+        c.hp = Math.min(c.maxHp, c.hp + (resting ? 0.8 : 0.05));
+        const med = c.skills.meditation.val;
+        c.mana = Math.min(c.maxMana, c.mana + (0.06 + med * 0.012) * (resting ? 3 : 1));
+        if (resting && c.mana < c.maxMana && chance(0.15)) {
+          Skills.tryGain(c, 'meditation', clamp(100 - (c.mana / c.maxMana) * 100, 0, 90));
+        }
+      }
+      // 敵の群れの行動
+      const sneakFactor = this.sneaking ? clamp(1 - Skills.avgOf(this.party, 'hiding') / 130, 0.2, 0.85) : 1;
+      for (const pk of [...this.packs()]) {
+        if (Entities.packTurn(pk, this.map(), this.px, this.py, sneakFactor)) {
+          this.startBattle(pk, false);
+          return true;
+        }
+      }
+      UI.dirty.party = true;
+    }
+    return false;
   },
 
-  respawn() {
-    const p = this.player;
-    p.dead = false;
-    p.hp = p.maxHp;
-    UI.hide('deathScreen');
-    this.toCamp();
+  startBattle(pack, playerInitiated) {
+    const ambush = playerInitiated && this.sneaking && !pack.aggro;
+    this.sneaking = false;
+    pack.aggro = true;
+    UI.hide('charPanel');
+    Battle.start(pack, ambush);
   },
 
-  onKey(e) {
-    const k = e.key.toLowerCase();
-    this.keys[k] = true;
-    if (this.state !== 'dungeon') {
-      if (k === 'c') UI.toggle('skillPanel');
-      if (k === 'i') UI.toggle('invPanel');
+  tryMove(dx, dy) {
+    const nx = this.px + dx, ny = this.py + dy;
+    const pk = this.packs().find(p => p.x === nx && p.y === ny);
+    if (pk) { this.startBattle(pk, true); return; }
+    if (!Dungeon.isWalkable(this.map(), nx + 0.5, ny + 0.5)) return;
+    this.px = nx; this.py = ny;
+    // 隠密移動: 歩くたびに隠密判定(下手だと敵に見つかりやすくなるだけ)
+    if (this.sneaking && chance(0.3)) {
+      for (const c of this.aliveParty()) if (chance(0.4)) Skills.tryGain(c, 'hiding', 40);
+    }
+    this.advanceTurn(1);
+  },
+
+  interact() {
+    const map = this.map();
+    const t = map.t[this.py * map.w + this.px];
+    // 足元: 階段
+    if (t === T_DOWN) {
+      this.gotoFloor(this.run.depth + 1, 'down');
+      UI.log(`地下${this.run.depth}階へ降りた。`, 'sys');
       return;
     }
-    const p = this.player;
-    switch (k) {
-      case 'c': UI.toggle('skillPanel'); break;
-      case 'i': UI.toggle('invPanel'); break;
-      case 'escape': UI.hide('skillPanel'); UI.hide('invPanel'); break;
-      case 'b': Combat.startBandage(p); break;
-      case 'h': Combat.tryHide(p, this.enemies()); break;
-      case 'm': Combat.toggleMeditate(p); break;
-      case 'e': this.interact(); break;
-      case '1': case '2': case '3': case '4': case '5':
-        Combat.startCast(p, parseInt(k) - 1); break;
+    if (t === T_UP) {
+      if (this.run.depth <= 1) {
+        UI.log('地上へ戻った。', 'good');
+        this.toCamp();
+      } else {
+        this.gotoFloor(this.run.depth - 1, 'up');
+        UI.log(`地下${this.run.depth}階へ上がった。`, 'sys');
+      }
+      return;
     }
-  },
-
-  enemies() { return this.run ? this.run.floors[this.run.depth].enemies : []; },
-  map() { return this.run ? this.run.floors[this.run.depth].map : null; },
-
-  // E: 足元と周囲1タイルを調べる(階段・宝箱・鉱脈)
-  interact() {
-    const p = this.player, map = this.map();
-    const cx = Math.floor(p.x), cy = Math.floor(p.y);
-    const spots = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
-    for (const [dx, dy] of spots) {
-      const tx = cx + dx, ty = cy + dy;
+    // 周囲: 宝箱・鉱脈
+    for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const tx = this.px + dx, ty = this.py + dy;
       if (tx < 0 || ty < 0 || tx >= map.w || ty >= map.h) continue;
-      const t = map.t[ty * map.w + tx];
-      if (t === T_DOWN && dx === 0 && dy === 0) {
-        this.gotoFloor(this.run.depth + 1, 'down');
-        UI.log(`地下${this.run.depth}階へ降りた。`, 'sys');
-        return;
-      }
-      if (t === T_UP && dx === 0 && dy === 0) {
-        if (this.run.depth <= 1) {
-          UI.log('地上へ戻った。', 'good');
-          this.toCamp();
-        } else {
-          this.gotoFloor(this.run.depth - 1, 'up');
-          UI.log(`地下${this.run.depth}階へ上がった。`, 'sys');
-        }
-        return;
-      }
-      if (t === T_CHEST) {
+      const tt = map.t[ty * map.w + tx];
+      if (tt === T_CHEST) {
         map.t[ty * map.w + tx] = T_FLOOR;
         delete map.meta[tx + ',' + ty];
-        Items.openChest(p, this.run.depth);
+        Items.openChest(this.party, this.run.depth);
+        this.advanceTurn(1);
         return;
       }
-      if (t === T_ORE) {
-        Crafting.startMine(p, map, tx, ty);
+      if (tt === T_ORE) {
+        Crafting.mineAttempt(map, tx, ty);
+        this.advanceTurn(2); // 採掘は2ターンかかる(敵は動く)
         return;
       }
     }
     UI.log('ここには何もない。', 'sys');
   },
 
-  frame(t) {
-    const dt = Math.min(0.05, (t - this.lastT) / 1000 || 0.016);
-    this.lastT = t;
+  rest() {
+    UI.log('その場で休息する…(10ターン)', 'sys');
+    if (this.advanceTurn(10, true)) UI.log('休息が破られた!', 'warn');
+    else UI.log('少し体力と精神が回復した。', 'heal');
+  },
 
-    if (this.state === 'dungeon' && !this.player.dead) {
-      const p = this.player, map = this.map(), enemies = this.enemies();
-
-      // 移動入力
-      let dx = 0, dy = 0;
-      if (this.keys['w'] || this.keys['arrowup']) dy -= 1;
-      if (this.keys['s'] || this.keys['arrowdown']) dy += 1;
-      if (this.keys['a'] || this.keys['arrowleft']) dx -= 1;
-      if (this.keys['d'] || this.keys['arrowright']) dx += 1;
-      const moving = dx !== 0 || dy !== 0;
-      if (moving) {
-        const len = Math.hypot(dx, dy);
-        let spd = 4.2 * (p.hidden ? 0.55 : 1) * (p.stam <= 2 ? 0.6 : 1);
-        Entities.moveEntity(map, p, dx / len * spd * dt, dy / len * spd * dt, 0.3);
-      }
-
-      Combat.updatePlayer(p, enemies, map, dt, moving);
-      for (const e of enemies) Entities.updateEnemy(e, p, map, dt);
-      Render.update(dt);
-      Render.draw(p, map, enemies);
-    } else if (this.player) {
-      Render.update(dt);
-      Render.draw(this.player, this.map(), this.run ? this.enemies() : []);
+  quickBandage() {
+    const healer = Skills.bestAt(this.party, 'healing');
+    const target = this.aliveParty().sort((a, b) => (a.hp / a.maxHp) - (b.hp / b.maxHp))[0];
+    if (!healer || !target) return;
+    if (target.hp >= target.maxHp) { UI.log('誰も傷ついていない。', 'sys'); return; }
+    if (!Items.partyConsume(this.party, 'bandage', 1)) { UI.log('包帯がない。', 'sys'); return; }
+    Skills.tryGain(healer, 'healing', clamp((1 - target.hp / target.maxHp) * 80 + 10, 0, 95));
+    const hs = healer.skills.healing.val;
+    if (chance(0.25 + hs / 150)) {
+      const amt = Math.round(randF(6, 12) + hs * 0.45);
+      target.hp = Math.min(target.maxHp, target.hp + amt);
+      UI.log(`${healer.name}が${target.name}に包帯を巻いた。HP+${amt}(3ターン)`, 'heal');
+    } else {
+      UI.log(`${healer.name}の手当ては失敗した…(3ターン)`, 'warn');
     }
+    this.advanceTurn(3);
+  },
 
-    if (this.player) UI.refresh();
-    requestAnimationFrame(tt => this.frame(tt));
+  toggleSneak() {
+    this.sneaking = !this.sneaking;
+    UI.log(this.sneaking ? '足音を殺して進む…(隠密移動)' : '隠密をやめた。', 'sys');
+  },
+
+  onWipe() {
+    this.state = 'wipe';
+    let lost = 0;
+    for (const c of this.party) { lost += c.inv.length; c.inv = []; }
+    const goldLost = Math.floor(this.gold * 0.3);
+    this.gold -= goldLost;
+    this.run = null;
+    Save.save();
+    UI.renderWipe(`携行品${lost}個と${goldLost}ゴールドを失った。ギルドの手で亡骸はキャンプへ運ばれた…`);
+    UI.show('wipeScreen');
+  },
+
+  // ===== 入力 =====
+  onKey(e) {
+    if (this.state !== 'dungeon' || Battle.active) return;
+    const k = e.key.toLowerCase();
+    switch (k) {
+      case 'w': case 'arrowup': this.tryMove(0, -1); break;
+      case 's': case 'arrowdown': this.tryMove(0, 1); break;
+      case 'a': case 'arrowleft': this.tryMove(-1, 0); break;
+      case 'd': case 'arrowright': this.tryMove(1, 0); break;
+      case 'e': this.interact(); break;
+      case 'r': this.rest(); break;
+      case 'b': this.quickBandage(); break;
+      case 'h': this.toggleSneak(); break;
+      case 'escape': UI.hide('charPanel'); break;
+      case '1': case '2': case '3': case '4': case '5': case '6': {
+        const i = parseInt(k) - 1;
+        if (this.party[i]) UI.openChar(i);
+        break;
+      }
+    }
+  },
+
+  frame() {
+    Render.draw();
+    if (this.state !== 'title') UI.refresh();
+    requestAnimationFrame(() => this.frame());
   },
 };
 

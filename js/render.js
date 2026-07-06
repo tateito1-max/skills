@@ -1,61 +1,42 @@
 'use strict';
-// Canvas 描画: タイル・視界(霧)・エンティティ・エフェクト
+// Canvas 描画: タイル・視界(霧)・敵の群れ・パーティ
 
 const Render = {
   cv: null, ctx: null,
-  floats: [],  // ダメージ数字など {x,y,txt,color,t}
-  beams: [],   // 矢・魔法の軌跡 {x0,y0,x1,y1,color,t}
 
   init() {
     this.cv = document.getElementById('cv');
     this.ctx = this.cv.getContext('2d');
   },
 
-  addFloat(x, y, txt, color) {
-    this.floats.push({ x, y, txt, color, t: 1.0 });
-  },
-
-  addBeam(x0, y0, x1, y1, color) {
-    this.beams.push({ x0, y0, x1, y1, color, t: 0.18 });
-  },
-
-  update(dt) {
-    for (const f of this.floats) { f.t -= dt; f.y -= dt * 0.8; }
-    this.floats = this.floats.filter(f => f.t > 0);
-    for (const b of this.beams) b.t -= dt;
-    this.beams = this.beams.filter(b => b.t > 0);
-  },
-
-  tileColor(t, meta) {
+  tileColor(t) {
     switch (t) {
       case T_WALL: return '#26232e';
-      case T_FLOOR: return '#4a4454';
-      case T_UP: return '#4a4454';
-      case T_DOWN: return '#4a4454';
       case T_ORE: return '#26232e';
-      case T_CHEST: return '#4a4454';
+      default: return '#4a4454';
     }
-    return '#000';
   },
 
-  draw(p, map, enemies) {
+  draw() {
     const ctx = this.ctx, W = this.cv.width, H = this.cv.height;
     ctx.fillStyle = '#131118';
     ctx.fillRect(0, 0, W, H);
+    if (Game.state !== 'dungeon') return;
+    const map = Game.map();
     if (!map) return;
+    const px = Game.px, py = Game.py;
 
-    const camX = p.x * TILE - W / 2, camY = p.y * TILE - H / 2;
+    const camX = (px + 0.5) * TILE - W / 2, camY = (py + 0.5) * TILE - H / 2;
     const x0 = Math.max(0, Math.floor(camX / TILE)), y0 = Math.max(0, Math.floor(camY / TILE));
     const x1 = Math.min(map.w - 1, Math.ceil((camX + W) / TILE)), y1 = Math.min(map.h - 1, Math.ceil((camY + H) / TILE));
 
     // 可視タイル判定(半径+LOS)し、explored に記録
     const visible = new Set();
-    const pr = Math.floor(p.x), pc = Math.floor(p.y);
-    for (let ty = pc - VIEW_RADIUS; ty <= pc + VIEW_RADIUS; ty++) {
-      for (let tx = pr - VIEW_RADIUS; tx <= pr + VIEW_RADIUS; tx++) {
+    for (let ty = py - VIEW_RADIUS; ty <= py + VIEW_RADIUS; ty++) {
+      for (let tx = px - VIEW_RADIUS; tx <= px + VIEW_RADIUS; tx++) {
         if (tx < 0 || ty < 0 || tx >= map.w || ty >= map.h) continue;
-        if (dist(tx + 0.5, ty + 0.5, p.x, p.y) > VIEW_RADIUS) continue;
-        if (!Dungeon.hasLOS(map, p.x, p.y, tx + 0.5, ty + 0.5)) continue;
+        if (dist(tx, ty, px, py) > VIEW_RADIUS) continue;
+        if (!Dungeon.hasLOS(map, px + 0.5, py + 0.5, tx + 0.5, ty + 0.5)) continue;
         visible.add(ty * map.w + tx);
         map.explored[ty * map.w + tx] = 1;
       }
@@ -75,7 +56,7 @@ const Render = {
         ctx.globalAlpha = vis ? 1 : 0.35;
         ctx.fillStyle = this.tileColor(t);
         ctx.fillRect(sx, sy, TILE, TILE);
-        if (t === T_FLOOR || t === T_UP || t === T_DOWN || t === T_CHEST) {
+        if (t !== T_WALL && t !== T_ORE) {
           ctx.strokeStyle = 'rgba(0,0,0,0.15)';
           ctx.strokeRect(sx + 0.5, sy + 0.5, TILE - 1, TILE - 1);
         }
@@ -92,61 +73,24 @@ const Render = {
       }
     }
 
-    // 敵(可視タイル上のみ)
-    for (const e of enemies) {
-      if (e.dead) continue;
-      const idx = Math.floor(e.y) * map.w + Math.floor(e.x);
+    // 敵の群れ(可視タイルのみ)。数を小さく添える
+    for (const pk of Game.packs()) {
+      const idx = pk.y * map.w + pk.x;
       if (!visible.has(idx)) continue;
-      const sx = e.x * TILE - camX, sy = e.y * TILE - camY;
-      ctx.fillText(e.glyph, sx, sy);
-      // HPバー
-      if (e.hp < e.maxHp) {
-        ctx.fillStyle = '#000';
-        ctx.fillRect(sx - 14, sy - 20, 28, 4);
-        ctx.fillStyle = '#e33';
-        ctx.fillRect(sx - 14, sy - 20, 28 * (e.hp / e.maxHp), 4);
+      const sx = (pk.x + 0.5) * TILE - camX, sy = (pk.y + 0.5) * TILE - camY;
+      ctx.fillText(pk.glyph, sx, sy);
+      if (pk.n > 1) {
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillStyle = pk.aggro ? '#ff8a6a' : '#cbc4dd';
+        ctx.fillText('×' + pk.n, sx + 10, sy + 10);
+        ctx.font = '22px serif';
       }
     }
 
-    // 軌跡
-    for (const b of this.beams) {
-      ctx.strokeStyle = b.color;
-      ctx.globalAlpha = clamp(b.t / 0.18, 0, 1);
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(b.x0 * TILE - camX, b.y0 * TILE - camY);
-      ctx.lineTo(b.x1 * TILE - camX, b.y1 * TILE - camY);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
-
-    // プレイヤー
-    const px = p.x * TILE - camX, py = p.y * TILE - camY;
-    ctx.globalAlpha = p.hidden ? 0.35 : 1;
-    ctx.fillText('🧝', px, py);
+    // パーティ
+    const sx = (px + 0.5) * TILE - camX, sy = (py + 0.5) * TILE - camY;
+    ctx.globalAlpha = Game.sneaking ? 0.45 : 1;
+    ctx.fillText('🧝', sx, sy);
     ctx.globalAlpha = 1;
-    if (p.meditating) ctx.fillText('🧘', px, py - 22);
-
-    // アクション進行バー(詠唱・包帯・採掘)
-    let prog = null, col = '#fff';
-    if (p.cast) { prog = 1 - p.cast.t / p.cast.spell.cast; col = '#a6f'; }
-    else if (p.bandT > 0) { prog = 1 - p.bandT / clamp(8 - p.dex / 25, 3, 8); col = '#6f6'; }
-    else if (p.mineT > 0) { prog = 1 - p.mineT / clamp(3.5 - p.skills.mining.val / 45, 1.2, 3.5); col = '#db5'; }
-    if (prog !== null) {
-      ctx.fillStyle = '#000';
-      ctx.fillRect(px - 16, py + 18, 32, 5);
-      ctx.fillStyle = col;
-      ctx.fillRect(px - 16, py + 18, 32 * clamp(prog, 0, 1), 5);
-    }
-
-    // ダメージ数字
-    ctx.font = 'bold 14px sans-serif';
-    for (const f of this.floats) {
-      ctx.globalAlpha = clamp(f.t, 0, 1);
-      ctx.fillStyle = f.color;
-      ctx.fillText(f.txt, f.x * TILE - camX, f.y * TILE - camY - 24);
-      ctx.globalAlpha = 1;
-    }
-    ctx.font = '22px serif';
   },
 };

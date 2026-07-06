@@ -1,121 +1,132 @@
 'use strict';
-// プレイヤー生成・派生値・敵の生成とAI
+// キャラクター生成・派生値、敵の群れ(パック)とそのターン行動
 
 const Entities = {
-  makePlayer(template) {
-    const p = {
-      x: 0, y: 0,
+  makeChar(name, template) {
+    const c = {
+      name, tplId: template.id,
+      row: template.row,
       str: template.stats.str, dex: template.stats.dex, int: template.stats.int,
-      hp: 0, mana: 0, stam: 0,
+      hp: 0, mana: 0,
       skills: {},
       equip: { weapon: null, shield: null, armor: null },
-      inv: [], storage: [], gold: 100,
-      deepest: 1,
-      // 一時状態
-      swingT: 0, cast: null, bandT: 0, mineT: 0, mineTarget: null,
-      hidden: false, meditating: false, hideT: 0,
+      inv: [],
       dead: false,
+      defending: false,
     };
     for (const id of SKILL_ORDER) {
-      p.skills[id] = { val: template.skills[id] || 0, lock: 'up' };
+      c.skills[id] = { val: template.skills[id] || 0, lock: 'up' };
     }
-    p.equip.weapon = Items.makeWeapon(template.weapon, 0);
-    if (template.shield) p.equip.shield = Items.makeShield(template.shield, 0);
-    p.equip.armor = Items.makeArmor('leather', 0);
-    Items.addToInv(p, Items.makeStack('bandage', 15));
-    Items.addToInv(p, Items.makeStack('healpot', 2));
-    Items.addToInv(p, Items.makeStack('manapot', 1));
-    this.recalc(p);
-    p.hp = p.maxHp; p.mana = p.maxMana; p.stam = p.maxStam;
-    return p;
+    c.equip.weapon = Items.makeWeapon(template.weapon, 0);
+    if (template.shield) c.equip.shield = Items.makeShield(template.shield, 0);
+    c.equip.armor = Items.makeArmor('leather', 0);
+    Items.addToChar(c, Items.makeStack('bandage', 5));
+    Items.addToChar(c, Items.makeStack('healpot', 1));
+    this.recalc(c);
+    c.hp = c.maxHp; c.mana = c.maxMana;
+    return c;
   },
 
-  recalc(p) {
-    p.maxHp = Math.floor(30 + p.str * 0.8);
-    p.maxMana = p.int;
-    p.maxStam = p.dex;
-    p.hp = Math.min(p.hp, p.maxHp);
-    p.mana = Math.min(p.mana, p.maxMana);
-    p.stam = Math.min(p.stam, p.maxStam);
+  recalc(c) {
+    c.maxHp = Math.floor(30 + c.str * 0.8);
+    c.maxMana = c.int;
+    c.hp = Math.min(c.hp, c.maxHp);
+    c.mana = Math.min(c.mana, c.maxMana);
   },
 
-  weaponOf(p) { return p.equip.weapon || Items.makeWeapon('fists', 0); },
+  weaponOf(c) { return c.equip.weapon || Items.makeWeapon('fists', 0); },
 
-  // 現在の武器に対応するスキル値(防御にも使う)
-  weaponSkillVal(p) {
-    const w = this.weaponOf(p);
-    return p.skills[WEAPONS[w.type].skill].val;
+  weaponSkillVal(c) {
+    const w = this.weaponOf(c);
+    return c.skills[WEAPONS[w.type].skill].val;
   },
 
-  makeEnemy(type, x, y, depth) {
+  armorOf(c) {
+    return (c.equip.armor ? c.equip.armor.def : 0) + (c.equip.shield ? c.equip.shield.def : 0);
+  },
+
+  // ===== 敵の群れ(マップ上の1シンボル=1エンカウント) =====
+  makePack(type, x, y, depth) {
     const d = ENEMIES[type];
-    const scale = 1 + Math.max(0, depth - d.depth) * 0.06; // 出現階より深いと強化
     return {
-      type, x, y,
+      type, x, y, depth,
       name: d.name, glyph: d.glyph,
-      hp: Math.floor(d.hp * scale), maxHp: Math.floor(d.hp * scale),
-      skill: Math.min(110, d.skill + Math.max(0, depth - d.depth) * 2),
-      dmg: d.dmg, speed: d.speed, aggroR: d.aggro, armor: d.armor,
-      ranged: !!d.ranged, rangedRange: d.rangedRange || 0,
-      gold: d.gold,
-      aggro: false, swingT: randF(0.5, 1.5), dead: false,
-      wanderT: 0, wx: 0, wy: 0,
+      n: randInt(d.pack[0], d.pack[1]),
+      aggroR: d.aggro,
+      aggro: false,
+      cooldown: 0, // 逃走直後は再交戦しない猶予ターン
+      wanderT: 0,
     };
   },
 
-  // 壁ずり移動(x軸y軸を別々に判定)。半径 r の円で判定
-  moveEntity(map, e, dx, dy, r) {
-    if (dx !== 0) {
-      const nx = e.x + dx;
-      const edge = nx + Math.sign(dx) * r;
-      if (Dungeon.isWalkable(map, edge, e.y - r * 0.7) && Dungeon.isWalkable(map, edge, e.y + r * 0.7)) e.x = nx;
+  // 戦闘用の敵グループを組む(パック本体+確率で援軍グループ)
+  buildGroups(pack) {
+    const depth = pack.depth;
+    const groups = [this.makeGroup(pack.type, pack.n, depth)];
+    if (chance(0.3 + depth * 0.015)) {
+      const pool = Object.keys(ENEMIES).filter(k => ENEMIES[k].depth <= depth && ENEMIES[k].depth >= depth - 5);
+      const t = choice(pool);
+      const d = ENEMIES[t];
+      groups.push(this.makeGroup(t, randInt(d.pack[0], d.pack[1]), depth));
     }
-    if (dy !== 0) {
-      const ny = e.y + dy;
-      const edge = ny + Math.sign(dy) * r;
-      if (Dungeon.isWalkable(map, e.x - r * 0.7, edge) && Dungeon.isWalkable(map, e.x + r * 0.7, edge)) e.y = ny;
-    }
+    return groups;
   },
 
-  updateEnemy(e, p, map, dt) {
-    if (e.dead || p.dead) return;
-    const d = dist(e.x, e.y, p.x, p.y);
+  makeGroup(type, n, depth) {
+    const d = ENEMIES[type];
+    const scale = 1 + Math.max(0, depth - d.depth) * 0.06;
+    const hp = Math.floor(d.hp * scale);
+    return {
+      type, name: d.name, glyph: d.glyph,
+      skill: Math.min(110, d.skill + Math.max(0, depth - d.depth) * 2),
+      dmg: d.dmg, armor: d.armor, ranged: !!d.ranged,
+      gold: d.gold,
+      members: Array.from({ length: n }, () => ({ hp, maxHp: hp })),
+    };
+  },
 
-    // 索敵。隠密中は感知半径が大きく縮む
-    if (!e.aggro) {
-      const r = e.aggroR * (p.hidden ? 0.22 : 1);
-      if (d < r && Dungeon.hasLOS(map, e.x, e.y, p.x, p.y)) {
-        e.aggro = true;
-        UI.log(`${e.name}がこちらに気づいた!`, 'warn');
+  // 1ワールドターンぶんのパック行動。交戦に入るなら true
+  packTurn(pack, map, px, py, sneakFactor) {
+    if (pack.cooldown > 0) { pack.cooldown--; return false; }
+    const d = Math.max(Math.abs(pack.x - px), Math.abs(pack.y - py)); // チェビシェフ距離
+
+    if (!pack.aggro) {
+      if (d <= pack.aggroR * sneakFactor && Dungeon.hasLOS(map, pack.x + 0.5, pack.y + 0.5, px + 0.5, py + 0.5)) {
+        pack.aggro = true;
+        UI.log(`${pack.name}の群れがこちらに気づいた!`, 'warn');
+      } else {
+        // 徘徊(2ターンに1歩)
+        pack.wanderT++;
+        if (pack.wanderT >= 2) {
+          pack.wanderT = 0;
+          const dir = choice([[1, 0], [-1, 0], [0, 1], [0, -1], [0, 0]]);
+          this.tryStep(pack, map, pack.x + dir[0], pack.y + dir[1], px, py);
+        }
+        return false;
       }
     }
 
-    e.swingT = Math.max(0, e.swingT - dt);
-
-    if (e.aggro && !p.hidden) {
-      const atkRange = e.ranged ? e.rangedRange : 1.5;
-      if (d > atkRange * 0.9) {
-        // 追跡
-        const s = e.speed * dt / Math.max(d, 0.001);
-        this.moveEntity(map, e, (p.x - e.x) * s, (p.y - e.y) * s, 0.35);
-      } else if (e.swingT <= 0 && Dungeon.hasLOS(map, e.x, e.y, p.x, p.y)) {
-        Combat.enemyAttack(e, p);
-        e.swingT = randF(1.6, 2.4);
+    if (pack.aggro) {
+      if (d <= 1) return true; // 隣接 → 交戦
+      // プレイヤーへ貪欲に1歩(隠密で見失うことも)
+      if (sneakFactor < 1 && chance(0.25)) { pack.aggro = false; return false; }
+      const sx = Math.sign(px - pack.x), sy = Math.sign(py - pack.y);
+      const opts = Math.abs(px - pack.x) >= Math.abs(py - pack.y)
+        ? [[sx, 0], [0, sy], [sx, sy]] : [[0, sy], [sx, 0], [sx, sy]];
+      for (const [dx, dy] of opts) {
+        if (dx === 0 && dy === 0) continue;
+        if (this.tryStep(pack, map, pack.x + dx, pack.y + dy, px, py)) break;
       }
-    } else {
-      // 徘徊
-      e.wanderT -= dt;
-      if (e.wanderT <= 0) {
-        e.wanderT = randF(1.5, 4);
-        const a = rand() * Math.PI * 2;
-        e.wx = Math.cos(a); e.wy = Math.sin(a);
-        if (chance(0.4)) { e.wx = 0; e.wy = 0; }
-      }
-      this.moveEntity(map, e, e.wx * e.speed * 0.3 * dt, e.wy * e.speed * 0.3 * dt, 0.35);
-      if (e.aggro && p.hidden) {
-        // 見失う
-        if (chance(dt * 0.5)) e.aggro = false;
-      }
+      return Math.max(Math.abs(pack.x - px), Math.abs(pack.y - py)) <= 1;
     }
+    return false;
+  },
+
+  tryStep(pack, map, nx, ny, px, py) {
+    if (!Dungeon.isWalkable(map, nx + 0.5, ny + 0.5)) return false;
+    if (nx === px && ny === py) return false; // プレイヤーのマスには乗らない(隣接判定で交戦)
+    if (Game.packs().some(o => o !== pack && o.x === nx && o.y === ny)) return false;
+    pack.x = nx; pack.y = ny;
+    return true;
   },
 };

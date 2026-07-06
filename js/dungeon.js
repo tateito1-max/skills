@@ -1,8 +1,7 @@
 'use strict';
-// ダンジョン自動生成: 部屋+通路、階段、鉱脈、宝箱、モンスター配置
+// ダンジョン自動生成: 部屋+通路、階段、鉱脈、宝箱、敵の群れ配置
 
 const Dungeon = {
-  // depth階のフロアを生成して返す
   generate(depth) {
     const w = 46, h = 34;
     const t = new Uint8Array(w * h); // 全部 T_WALL(=0)
@@ -34,14 +33,14 @@ const Dungeon = {
     // 上り階段(スポーン)と下り階段(最遠部屋)
     const start = rooms[0];
     map.t[start.cy * w + start.cx] = T_UP;
-    map.spawnX = start.cx + 0.5; map.spawnY = start.cy + 0.5;
+    map.spawnX = start.cx; map.spawnY = start.cy;
     let far = rooms[0], fd = -1;
     for (const r of rooms) {
       const d = dist(start.cx, start.cy, r.cx, r.cy);
       if (d > fd) { fd = d; far = r; }
     }
     map.t[far.cy * w + far.cx] = T_DOWN;
-    map.downX = far.cx + 0.5; map.downY = far.cy + 0.5;
+    map.downX = far.cx; map.downY = far.cy;
 
     // 鉱脈: 床に隣接した壁を鉱石タイルに
     const metals = METALS.filter(m => m.depth <= depth);
@@ -50,9 +49,8 @@ const Dungeon = {
     for (let i = 0; i < 300 && placed < veins; i++) {
       const x = randInt(1, w - 2), y = randInt(1, h - 2);
       if (t[y * w + x] !== T_WALL) continue;
-      const adj = [[1,0],[-1,0],[0,1],[0,-1]].some(([dx,dy]) => t[(y+dy) * w + (x+dx)] === T_FLOOR);
+      const adj = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => t[(y + dy) * w + (x + dx)] === T_FLOOR);
       if (!adj) continue;
-      // 深層の金属ほど出にくい
       let metal = metals[0];
       for (const m of metals) if (chance(0.45)) metal = m;
       t[y * w + x] = T_ORE;
@@ -69,8 +67,8 @@ const Dungeon = {
       map.meta[x + ',' + y] = { chest: true };
     }
 
-    // モンスター配置
-    const enemies = [];
+    // 敵の群れ配置(部屋ごとに確率で1〜2パック)
+    const packs = [];
     const types = Object.keys(ENEMIES).filter(k => {
       const e = ENEMIES[k];
       return e.depth <= depth && e.depth >= depth - 5;
@@ -78,15 +76,16 @@ const Dungeon = {
     if (types.length === 0) types.push('rat');
     for (let i = 1; i < rooms.length; i++) {
       const r = rooms[i];
-      const n = randInt(1, Math.min(3, 1 + Math.floor(depth / 3)));
+      const n = chance(0.7) ? 1 : 2;
       for (let j = 0; j < n; j++) {
-        const x = randInt(r.x, r.x + r.w - 1) + 0.5, y = randInt(r.y, r.y + r.h - 1) + 0.5;
-        if (t[Math.floor(y) * w + Math.floor(x)] !== T_FLOOR) continue;
-        enemies.push(Entities.makeEnemy(choice(types), x, y, depth));
+        const x = randInt(r.x, r.x + r.w - 1), y = randInt(r.y, r.y + r.h - 1);
+        if (t[y * w + x] !== T_FLOOR) continue;
+        if (packs.some(p => p.x === x && p.y === y)) continue;
+        packs.push(Entities.makePack(choice(types), x, y, depth));
       }
     }
 
-    return { map, enemies };
+    return { map, packs };
   },
 
   tileAt(map, x, y) {

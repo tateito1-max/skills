@@ -1,8 +1,9 @@
 'use strict';
-// ゲームデータ定義(スキル・武具・敵・魔法・金属・レシピ)
+// ゲームデータ定義(スキル・武具・敵・魔法・金属・レシピ・重量)
 
-const SKILL_CAP = 700;   // スキル合計キャップ(UOの700に準拠)
+const SKILL_CAP = 700;   // スキル合計キャップ(1キャラあたり。UOの700に準拠)
 const STAT_CAP = 225;    // STR+DEX+INT の合計キャップ
+const PARTY_MAX = 6;     // パーティ最大人数
 
 // スキル定義。stat はスキル使用時に成長しうるステータスの重み
 const SKILLS = {
@@ -19,28 +20,36 @@ const SKILLS = {
 };
 const SKILL_ORDER = ['swords', 'archery', 'tactics', 'parrying', 'magery', 'meditation', 'healing', 'hiding', 'mining', 'blacksmithy'];
 
-// 武器タイプ。speed=基本スイング間隔(秒)、range=射程(タイル)
+// 武器タイプ。range>2 は後衛からも使える遠隔武器
 const WEAPONS = {
-  fists:      { name: '素手',         skill: 'swords',  dmg: [1, 3],   speed: 1.6, range: 1.6 },
-  dagger:     { name: 'ダガー',       skill: 'swords',  dmg: [3, 8],   speed: 1.2, range: 1.6 },
-  longsword:  { name: 'ロングソード', skill: 'swords',  dmg: [6, 15],  speed: 1.9, range: 1.7 },
-  broadsword: { name: 'ブロードソード', skill: 'swords', dmg: [8, 19], speed: 2.2, range: 1.7 },
-  waraxe:     { name: 'ウォーアックス', skill: 'swords', dmg: [11, 25], speed: 2.7, range: 1.7 },
-  bow:        { name: 'ボウ',         skill: 'archery', dmg: [8, 18],  speed: 2.6, range: 6.5 },
-  crossbow:   { name: 'クロスボウ',   skill: 'archery', dmg: [12, 26], speed: 3.3, range: 6.5 },
+  fists:      { name: '素手',           skill: 'swords',  dmg: [1, 3],   range: 1, w: 0 },
+  dagger:     { name: 'ダガー',         skill: 'swords',  dmg: [3, 8],   range: 1, w: 1 },
+  longsword:  { name: 'ロングソード',   skill: 'swords',  dmg: [6, 15],  range: 1, w: 4 },
+  broadsword: { name: 'ブロードソード', skill: 'swords',  dmg: [8, 19],  range: 1, w: 5 },
+  waraxe:     { name: 'ウォーアックス', skill: 'swords',  dmg: [11, 25], range: 1, w: 7 },
+  bow:        { name: 'ボウ',           skill: 'archery', dmg: [8, 18],  range: 6, w: 3 },
+  crossbow:   { name: 'クロスボウ',     skill: 'archery', dmg: [12, 26], range: 6, w: 5 },
 };
 
 const ARMORS = {
-  leather: { name: 'レザーアーマー',   def: 3 },
-  studded: { name: 'スタデッドアーマー', def: 5 },
-  chain:   { name: 'チェインメイル',   def: 8 },
-  plate:   { name: 'プレートメイル',   def: 12 },
+  leather: { name: 'レザーアーマー',     def: 3,  w: 4 },
+  studded: { name: 'スタデッドアーマー', def: 5,  w: 6 },
+  chain:   { name: 'チェインメイル',     def: 8,  w: 10 },
+  plate:   { name: 'プレートメイル',     def: 12, w: 15 },
 };
 
 const SHIELDS = {
-  buckler: { name: 'バックラー',     def: 2 },
-  heater:  { name: 'ヒーターシールド', def: 4 },
+  buckler: { name: 'バックラー',       def: 2, w: 3 },
+  heater:  { name: 'ヒーターシールド', def: 4, w: 5 },
 };
+
+// スタック品の1個あたり重量
+const STACKABLE = {
+  bandage: { name: '包帯',           w: 0.1 },
+  healpot: { name: '回復ポーション', w: 0.5 },
+  manapot: { name: 'マナポーション', w: 0.5 },
+};
+const ORE_W = 4, INGOT_W = 2; // 鉱石・インゴットの重量
 
 // UO風の武器ティア接頭辞(ダメージ倍率)
 const WEAPON_TIERS = [
@@ -61,37 +70,37 @@ const ARMOR_TIERS = [
   { name: 'インバルネラビリティ', add: 13 },
 ];
 
-// 敵定義。depth=出現開始階層、skill=戦闘スキル(命中/回避/スキル成長難易度)
+// 敵定義。depth=出現開始階層、pack=群れの規模、ranged=後衛も狙える遠隔攻撃
 const ENEMIES = {
-  rat:      { name: 'ドブネズミ',   glyph: '🐀', depth: 1,  hp: 14,  skill: 10, dmg: [1, 4],   speed: 2.6, aggro: 5, gold: [0, 5],   armor: 0 },
-  bat:      { name: '巨大コウモリ', glyph: '🦇', depth: 1,  hp: 12,  skill: 15, dmg: [2, 5],   speed: 3.4, aggro: 6, gold: [0, 6],   armor: 0 },
-  slime:    { name: 'スライム',     glyph: '🟢', depth: 2,  hp: 30,  skill: 20, dmg: [3, 7],   speed: 1.4, aggro: 5, gold: [3, 12],  armor: 1 },
-  skeleton: { name: 'スケルトン',   glyph: '💀', depth: 2,  hp: 34,  skill: 30, dmg: [4, 10],  speed: 2.2, aggro: 7, gold: [5, 20],  armor: 2 },
-  zombie:   { name: 'ゾンビ',       glyph: '🧟', depth: 3,  hp: 55,  skill: 32, dmg: [5, 12],  speed: 1.5, aggro: 6, gold: [5, 22],  armor: 2 },
-  orc:      { name: 'オーク',       glyph: '👹', depth: 4,  hp: 62,  skill: 46, dmg: [7, 15],  speed: 2.4, aggro: 8, gold: [15, 45], armor: 4 },
-  ettin:    { name: 'エティン',     glyph: '👺', depth: 6,  hp: 100, skill: 58, dmg: [10, 22], speed: 2.0, aggro: 8, gold: [25, 70], armor: 6 },
-  troll:    { name: 'トロール',     glyph: '🧌', depth: 8,  hp: 140, skill: 68, dmg: [13, 28], speed: 2.2, aggro: 8, gold: [40, 100], armor: 8 },
-  lich:     { name: 'リッチ',       glyph: '🌑', depth: 10, hp: 160, skill: 82, dmg: [18, 34], speed: 2.0, aggro: 9, gold: [80, 180], armor: 8, ranged: true, rangedRange: 5.5 },
-  dragon:   { name: 'ドラゴン',     glyph: '🐉', depth: 13, hp: 300, skill: 98, dmg: [24, 45], speed: 2.6, aggro: 9, gold: [200, 450], armor: 14, ranged: true, rangedRange: 4.5 },
+  rat:      { name: 'ドブネズミ',   glyph: '🐀', depth: 1,  hp: 12,  skill: 10, dmg: [1, 4],   aggro: 5, gold: [0, 4],   armor: 0, pack: [2, 5] },
+  bat:      { name: '巨大コウモリ', glyph: '🦇', depth: 1,  hp: 10,  skill: 15, dmg: [2, 5],   aggro: 6, gold: [0, 5],   armor: 0, pack: [2, 4] },
+  slime:    { name: 'スライム',     glyph: '🟢', depth: 2,  hp: 26,  skill: 20, dmg: [3, 7],   aggro: 5, gold: [2, 10],  armor: 1, pack: [1, 3] },
+  skeleton: { name: 'スケルトン',   glyph: '💀', depth: 2,  hp: 30,  skill: 30, dmg: [4, 10],  aggro: 7, gold: [4, 16],  armor: 2, pack: [2, 4] },
+  zombie:   { name: 'ゾンビ',       glyph: '🧟', depth: 3,  hp: 48,  skill: 32, dmg: [5, 12],  aggro: 6, gold: [4, 18],  armor: 2, pack: [2, 4] },
+  orc:      { name: 'オーク',       glyph: '👹', depth: 4,  hp: 55,  skill: 46, dmg: [7, 15],  aggro: 8, gold: [10, 35], armor: 4, pack: [2, 4] },
+  ettin:    { name: 'エティン',     glyph: '👺', depth: 6,  hp: 90,  skill: 58, dmg: [10, 22], aggro: 8, gold: [20, 55], armor: 6, pack: [1, 2] },
+  troll:    { name: 'トロール',     glyph: '🧌', depth: 8,  hp: 125, skill: 68, dmg: [13, 28], aggro: 8, gold: [30, 80], armor: 8, pack: [1, 2] },
+  lich:     { name: 'リッチ',       glyph: '🌑', depth: 10, hp: 145, skill: 82, dmg: [18, 34], aggro: 9, gold: [60, 150], armor: 8, pack: [1, 2], ranged: true },
+  dragon:   { name: 'ドラゴン',     glyph: '🐉', depth: 13, hp: 280, skill: 98, dmg: [24, 45], aggro: 9, gold: [150, 400], armor: 14, pack: [1, 1], ranged: true },
 };
 
-// 魔法。diff=スキル成長/成功判定の難易度
+// 魔法。t=対象種別(enemy=敵1体 / group=敵グループ / ally=味方1人)
 const SPELLS = [
-  { id: 'marrow',  name: 'マジックアロー',   mana: 4,  cast: 0.7, diff: 0,  dmg: [5, 10],  color: '#8cf' },
-  { id: 'heal',    name: 'ヒール',           mana: 6,  cast: 0.9, diff: 15, heal: [8, 18], color: '#8f8' },
-  { id: 'fball',   name: 'ファイアボール',   mana: 10, cast: 1.2, diff: 32, dmg: [14, 26], color: '#f83' },
-  { id: 'bolt',    name: 'ライトニング',     mana: 15, cast: 1.4, diff: 52, dmg: [22, 38], color: '#ff5' },
-  { id: 'gheal',   name: 'グレーターヒール', mana: 14, cast: 1.4, diff: 62, heal: [26, 46], color: '#5fa' },
+  { id: 'marrow', name: 'マジックアロー',   mana: 4,  diff: 0,  t: 'enemy', dmg: [5, 10] },
+  { id: 'heal',   name: 'ヒール',           mana: 6,  diff: 15, t: 'ally',  heal: [8, 18] },
+  { id: 'fball',  name: 'ファイアボール',   mana: 10, diff: 32, t: 'group', dmg: [12, 22] },
+  { id: 'bolt',   name: 'ライトニング',     mana: 15, diff: 52, t: 'enemy', dmg: [22, 38] },
+  { id: 'gheal',  name: 'グレーターヒール', mana: 14, diff: 62, t: 'ally',  heal: [26, 46] },
 ];
 
 // 金属(採掘)。depth=出現階層、diff=採掘/精錬難易度、tierBias=鍛冶時のティア補正
 const METALS = [
-  { id: 'iron',     name: 'アイアン',     depth: 1,  diff: 0,   color: '#9aa2ad', tierBias: 0 },
-  { id: 'shadow',   name: 'シャドウ',     depth: 4,  diff: 30,  color: '#5a5f6e', tierBias: 1 },
-  { id: 'gold',     name: 'ゴールド',     depth: 7,  diff: 50,  color: '#d9b23c', tierBias: 2 },
-  { id: 'agapite',  name: 'アガパイト',   depth: 10, diff: 65,  color: '#c47a5a', tierBias: 3 },
-  { id: 'verite',   name: 'ヴェライト',   depth: 13, diff: 80,  color: '#5aa06a', tierBias: 4 },
-  { id: 'valorite', name: 'ヴァロライト', depth: 16, diff: 92,  color: '#5a7ec4', tierBias: 5 },
+  { id: 'iron',     name: 'アイアン',     depth: 1,  diff: 0,  color: '#9aa2ad', tierBias: 0 },
+  { id: 'shadow',   name: 'シャドウ',     depth: 4,  diff: 30, color: '#5a5f6e', tierBias: 1 },
+  { id: 'gold',     name: 'ゴールド',     depth: 7,  diff: 50, color: '#d9b23c', tierBias: 2 },
+  { id: 'agapite',  name: 'アガパイト',   depth: 10, diff: 65, color: '#c47a5a', tierBias: 3 },
+  { id: 'verite',   name: 'ヴェライト',   depth: 13, diff: 80, color: '#5aa06a', tierBias: 4 },
+  { id: 'valorite', name: 'ヴァロライト', depth: 16, diff: 92, color: '#5a7ec4', tierBias: 5 },
 ];
 
 // 鍛冶レシピ(インゴット数と難易度)
@@ -106,41 +115,51 @@ const RECIPES = [
   { kind: 'armor',  type: 'plate',      ingots: 18, diff: 70 },
 ];
 
-// 生い立ち(初期テンプレート)
+// 生い立ち(キャラ作成テンプレート)
 const TEMPLATES = [
   {
-    id: 'warrior', name: '剣士', desc: '剣と盾で正面から戦う。',
+    id: 'warrior', name: '剣士', desc: '剣と盾で前衛を張る。',
     skills: { swords: 35, tactics: 30, parrying: 20, healing: 15 },
     stats: { str: 30, dex: 25, int: 10 },
-    weapon: 'longsword', shield: 'buckler',
+    weapon: 'longsword', shield: 'buckler', row: 'front',
   },
   {
-    id: 'archer', name: '射手', desc: '距離を保ち弓で仕留める。',
+    id: 'archer', name: '射手', desc: '後衛から弓で仕留める。',
     skills: { archery: 35, tactics: 30, hiding: 20, healing: 15 },
     stats: { str: 20, dex: 35, int: 10 },
-    weapon: 'bow', shield: null,
+    weapon: 'bow', shield: null, row: 'back',
   },
   {
-    id: 'mage', name: '魔導士', desc: '魔法と瞑想を操る。打たれ弱い。',
+    id: 'mage', name: '魔導士', desc: '攻撃魔法と瞑想。打たれ弱い。',
     skills: { magery: 35, meditation: 30, healing: 20, hiding: 15 },
     stats: { str: 15, dex: 15, int: 35 },
-    weapon: 'dagger', shield: null,
+    weapon: 'dagger', shield: null, row: 'back',
   },
   {
-    id: 'smith', name: '坑夫鍛冶', desc: '掘って鍛えて装備で勝つ。',
+    id: 'priest', name: '僧侶', desc: '回復魔法と手当てで支える。',
+    skills: { magery: 25, meditation: 20, healing: 35, parrying: 20 },
+    stats: { str: 20, dex: 20, int: 25 },
+    weapon: 'dagger', shield: 'buckler', row: 'back',
+  },
+  {
+    id: 'smith', name: '坑夫鍛冶', desc: '掘って鍛えて装備で勝つ。力持ち。',
     skills: { mining: 35, blacksmithy: 30, swords: 20, tactics: 15 },
-    stats: { str: 30, dex: 20, int: 15 },
-    weapon: 'dagger', shield: null,
+    stats: { str: 35, dex: 20, int: 10 },
+    weapon: 'dagger', shield: null, row: 'front',
   },
 ];
+
+// キャラ名の候補
+const NAMES = ['アイン', 'ベルガ', 'セシル', 'ドレイク', 'エルザ', 'フィン', 'ギデオン', 'ハンナ', 'イオリ', 'ヨルグ', 'カイ', 'リタ', 'ムジカ', 'ノア'];
 
 // タイル種別
 const T_WALL = 0, T_FLOOR = 1, T_UP = 2, T_DOWN = 3, T_ORE = 4, T_CHEST = 5;
 
 const TILE = 32;              // タイル描画サイズ(px)
 const VIEW_RADIUS = 8;        // 視界半径(タイル)
+
 const SHOP = [
-  { id: 'bandage', name: '包帯 ×10', gold: 30 },
-  { id: 'healpot', name: '回復ポーション', gold: 25 },
-  { id: 'manapot', name: 'マナポーション', gold: 25 },
+  { id: 'bandage', name: '包帯 ×10', gold: 30, n: 10 },
+  { id: 'healpot', name: '回復ポーション', gold: 25, n: 1 },
+  { id: 'manapot', name: 'マナポーション', gold: 25, n: 1 },
 ];
